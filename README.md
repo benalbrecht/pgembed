@@ -51,23 +51,23 @@ PostgreSQL binaries are available at `pgembed.POSTGRES_BIN_PATH` if you need dir
 pgembed supports optional PostgreSQL extensions as separate packages. Install the extensions you need:
 
 ```bash
-# Base installation (PostgreSQL only)
+# Base installation (PostgreSQL + pgvector, pg_textsearch, pg_duckdb)
 pip install pgembed
 
 # With specific extensions (separate wheels)
 pip install pgembed-pgvector
-pip install pgembed-pgvectorscale
 pip install pgembed-pgtextsearch
+pip install pgembed-pgsearch
 pip install pgembed-http
 
 # Multiple extensions
-pip install pgembed-pgvector pgembed-pgvectorscale pgembed-pgtextsearch pgembed-http
+pip install pgembed-pgvector pgembed-pgtextsearch pgembed-pgsearch pgembed-http
 ```
 
 Available extensions:
 - `pgembed-pgvector`: Vector similarity search (works on all platforms)
-- `pgembed-pgvectorscale`: High-performance vector storage (requires Rust, not available on Alpine/Windows)
-- `pgembed-pgtextsearch`: BM25-based full-text search (requires Rust, not available on Alpine/Windows)
+- `pgembed-pgtextsearch`: BM25-based full-text search (not available on Alpine/Windows)
+- `pgembed-pgsearch`: ParadeDB `pg_search` (`v0.27.0`, AGPL-3.0) BM25 full-text search & analytics (requires `shared_preload_libraries=['pg_search']` and `pgvector`, not available on Alpine/Windows)
 - `pgembed-http`: HTTP client (`http_get`, `http_post`, …) via pgsql-http (requires libcurl at build time)
 
 ### Checking available extensions
@@ -77,19 +77,24 @@ import pgembed
 
 # Check which extensions are available
 print(pgembed.list_extensions())
-# {'pgvector': True, 'pgvectorscale': True, 'pgtextsearch': False, 'pg_duckdb': True}
+# {'pgvector': True, 'pgvectorscale': False, 'pgtextsearch': True, 'pg_search': True, 'pg_duckdb': True, 'pgsql_http': False}
 
 # Check if a specific extension is available
 if pgembed.has_extension('pgvector'):
     # Create the extension
     server.create_extension('vector')
+
+# pg_search (v0.27+) requires shared_preload_libraries at server start:
+if pgembed.has_extension('pg_search'):
+    with pgembed.get_server('/path/to/my/data/dir', shared_preload_libraries=['pg_search']) as server:
+        server.create_extension('pg_search')
 ```
 
 ### Platform Support
 
 - **pgvector**: Works on Linux, macOS (Intel & Apple Silicon), Windows
-- **pgvectorscale**: Works on Linux, macOS (Intel & Apple Silicon). NOT available on Alpine Linux or Windows (requires Rust)
-- **pgtextsearch**: Works on Linux, macOS (Intel & Apple Silicon). NOT available on Alpine Linux or Windows (requires Rust)
+- **pgtextsearch**: Works on Linux, macOS (Intel & Apple Silicon). NOT available on Alpine Linux or Windows
+- **pgembed-pgsearch**: Works on Linux (`x86_64`, `aarch64`) and macOS (Apple Silicon). NOT available on Alpine Linux or Windows (requires Rust `1.100.0` + `cargo-pgrx 0.20.0` and OpenBLAS on Linux; licensed under AGPL-3.0)
 - **pgembed-http**: Works on Linux, macOS (Intel & Apple Silicon). Requires libcurl dev headers at build time (`libcurl4-openssl-dev` on Debian/Ubuntu)
 
 ### Building specific extensions
@@ -100,11 +105,11 @@ To build only specific extensions:
 # Build only pgvector
 make pgvector
 
-# Build only pgvectorscale
-make pgvectorscale
-
 # Build only pgtextsearch
 make pgtextsearch
+
+# Build only pg_search (for the pgembed-pgsearch split wheel; also builds pgvector)
+make EXTENSIONS="pg_search" all
 
 # Build only pgsql-http (for the pgembed-http split wheel)
 make EXTENSIONS="pgsql_http" all
@@ -119,4 +124,4 @@ pgembed is a fork of [pgserver](https://github.com/orm011/pgserver), which was i
 
 - Multi-platform support (Linux, macOS, Windows)
 - Robust process management and cleanup
-- Built-in pgvector, pgvectorscale, and pg_textsearch extensions
+- Built-in pgvector, pg_textsearch, pg_duckdb, and optional split extension wheels (`pgembed-pgsearch`, `pgembed-http`)

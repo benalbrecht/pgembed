@@ -6,8 +6,15 @@ IS_MUSL ?= $(shell if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | gre
 # Detect Windows and add .exe extension for executables
 ifeq ($(OS),Windows_NT)
     EXE_EXT := .exe
+    SHLIB_EXT := .dll
 else
     EXE_EXT :=
+    UNAME_S := $(shell uname -s)
+    ifeq ($(UNAME_S),Darwin)
+        SHLIB_EXT := .dylib
+    else
+        SHLIB_EXT := .so
+    endif
 endif
 
 ifeq ($(OS),Windows_NT)
@@ -19,7 +26,7 @@ else
 endif
 
 ifeq ($(RUST_EXTENSIONS_SUPPORTED),1)
-EXTENSIONS ?= pgvector pgvectorscale pgtextsearch
+EXTENSIONS ?= pgvector pgtextsearch
 else
 EXTENSIONS ?= pgvector
 endif
@@ -42,12 +49,12 @@ EXTENSIONS := $(filter-out $(UNSUPPORTED_EXTENSIONS),$(REQUESTED_EXTENSIONS))
 all: postgres $(EXTENSIONS)
 
 .PHONY: pgvector pgvectorscale pgtextsearch pg_search pg_duckdb pgsql_http
-pgvector: postgres $(INSTALL_PREFIX)/lib/vector.so
-pgvectorscale: postgres $(INSTALL_PREFIX)/lib/vectorscale.so
-pgtextsearch: postgres $(INSTALL_PREFIX)/lib/pg_textsearch.so
-pg_search: postgres $(INSTALL_PREFIX)/lib/pg_search.so
-pg_duckdb: postgres $(INSTALL_PREFIX)/lib/pg_duckdb.so
-pgsql_http: postgres $(INSTALL_PREFIX)/lib/http.so
+pgvector: postgres $(INSTALL_PREFIX)/lib/vector$(SHLIB_EXT)
+pgvectorscale: postgres $(INSTALL_PREFIX)/lib/vectorscale$(SHLIB_EXT)
+pgtextsearch: postgres $(INSTALL_PREFIX)/lib/pg_textsearch$(SHLIB_EXT)
+pg_search: postgres pgvector $(INSTALL_PREFIX)/lib/pg_search$(SHLIB_EXT)
+pg_duckdb: postgres $(INSTALL_PREFIX)/lib/pg_duckdb$(SHLIB_EXT)
+pgsql_http: postgres $(INSTALL_PREFIX)/lib/http$(SHLIB_EXT)
 
 ### postgres
 # Major postgres version to build. Override from the command line or CI, e.g. `make PG_MAJOR=18`.
@@ -94,7 +101,7 @@ $(PGVECTOR_DIR)/Makefile: $(PGVECTOR_DIR).tar.gz
 	tar xzf $(PGVECTOR_DIR).tar.gz -C $(PGVECTOR_DIR) --strip-components=1
 	touch $(PGVECTOR_DIR)/Makefile
 
-$(INSTALL_PREFIX)/lib/vector.so: $(PGVECTOR_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/vector$(SHLIB_EXT): $(PGVECTOR_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& $(MAKE) -C $(PGVECTOR_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) -j \
 		&& $(MAKE) -C $(PGVECTOR_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) install
@@ -112,7 +119,7 @@ $(PGSQL_HTTP_DIR)/Makefile: $(PGSQL_HTTP_DIR).tar.gz
 	tar xzf $(PGSQL_HTTP_DIR).tar.gz -C $(PGSQL_HTTP_DIR) --strip-components=1
 	touch $(PGSQL_HTTP_DIR)/Makefile
 
-$(INSTALL_PREFIX)/lib/http.so: $(PGSQL_HTTP_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/http$(SHLIB_EXT): $(PGSQL_HTTP_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& $(MAKE) -C $(PGSQL_HTTP_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) -j \
 		&& $(MAKE) -C $(PGSQL_HTTP_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) install
@@ -126,7 +133,7 @@ $(PG_DUCKDB_DIR)/Makefile:
 	cd $(PG_DUCKDB_DIR) && git submodule update --init --recursive
 	touch $(PG_DUCKDB_DIR)/Makefile
 
-$(INSTALL_PREFIX)/lib/pg_duckdb.so: $(PG_DUCKDB_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/pg_duckdb$(SHLIB_EXT): $(PG_DUCKDB_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
 ifneq ($(OS),Windows_NT)
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& $(MAKE) -C $(PG_DUCKDB_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) DUCKDB_BUILD=ReleaseStatic install
@@ -147,7 +154,7 @@ $(PGVECTORSCALE_DIR)/pgvectorscale/Cargo.toml: $(PGVECTORSCALE_DIR).tar.gz
 	tar xzf $(PGVECTORSCALE_DIR).tar.gz -C $(PGVECTORSCALE_DIR) --strip-components=1
 	touch $(PGVECTORSCALE_DIR)/pgvectorscale/Cargo.toml
 
-$(INSTALL_PREFIX)/lib/vectorscale.so: $(PGVECTORSCALE_DIR)/pgvectorscale/Cargo.toml $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/vectorscale$(SHLIB_EXT): $(PGVECTORSCALE_DIR)/pgvectorscale/Cargo.toml $(INSTALL_PREFIX)/bin/postgres
 ifeq ($(RUST_EXTENSIONS_SUPPORTED),1)
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& export PATH="$$HOME/.cargo/bin:$$PATH" \
@@ -173,7 +180,7 @@ $(PGTEXTSEARCH_DIR)/Makefile: $(PGTEXTSEARCH_DIR).tar.gz
 	tar xzf $(PGTEXTSEARCH_DIR).tar.gz -C $(PGTEXTSEARCH_DIR) --strip-components=1
 	touch $(PGTEXTSEARCH_DIR)/Makefile
 
-$(INSTALL_PREFIX)/lib/pg_textsearch.so: $(PGTEXTSEARCH_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/pg_textsearch$(SHLIB_EXT): $(PGTEXTSEARCH_DIR)/Makefile $(INSTALL_PREFIX)/bin/postgres
 ifeq ($(RUST_EXTENSIONS_SUPPORTED),1)
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& $(MAKE) -C $(PGTEXTSEARCH_DIR) PG_CONFIG=$(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) -j \
@@ -185,7 +192,7 @@ else
 endif
 
 ### pg_search
-PGSEARCH_TAG ?= v0.21.14
+PGSEARCH_TAG ?= v0.27.0
 PGSEARCH_URL := https://github.com/paradedb/paradedb/archive/refs/tags/$(PGSEARCH_TAG).tar.gz
 PGSEARCH_DIR := paradedb-$(PGSEARCH_TAG)
 PGSEARCH_SUBDIR := $(PGSEARCH_DIR)/pg_search
@@ -198,13 +205,13 @@ $(PGSEARCH_SUBDIR)/Cargo.toml: $(PGSEARCH_DIR).tar.gz
 	tar xzf $(PGSEARCH_DIR).tar.gz -C $(PGSEARCH_DIR) --strip-components=1
 	touch $(PGSEARCH_SUBDIR)/Cargo.toml
 
-$(INSTALL_PREFIX)/lib/pg_search.so: $(PGSEARCH_SUBDIR)/Cargo.toml $(INSTALL_PREFIX)/bin/postgres
+$(INSTALL_PREFIX)/lib/pg_search$(SHLIB_EXT): $(PGSEARCH_SUBDIR)/Cargo.toml $(INSTALL_PREFIX)/bin/postgres $(INSTALL_PREFIX)/lib/vector$(SHLIB_EXT)
 ifeq ($(RUST_EXTENSIONS_SUPPORTED),1)
 	unset MAKELEVEL && unset MAKEFLAGS && unset MFLAGS \
 		&& export PATH="$$HOME/.cargo/bin:$$PATH" \
-		&& cd $(PGSEARCH_SUBDIR) \
+		&& cd $(PGSEARCH_DIR) \
 		&& cargo pgrx init --pg$(PG_MAJOR) $(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT) \
-		&& cargo pgrx install --release --pg-config $(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT)
+		&& cargo pgrx install --package pg_search --release --no-assemble-unreleased --pg-config $(INSTALL_PREFIX)/bin/pg_config$(EXE_EXT)
 else ifeq ($(OS),Windows_NT)
 	$(error pg_search build is not supported on Windows due to cargo-pgrx issues)
 else

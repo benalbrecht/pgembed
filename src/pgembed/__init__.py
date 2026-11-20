@@ -33,16 +33,24 @@ EXTENSION_PACKAGES = {
     "pgvector": "pgembed_pgvector",
     "pgvectorscale": "pgembed_pgvectorscale",
     "pgtextsearch": "pgembed_pgtextsearch",
-    "pgsql_http": "pgembed_pgsql_http"
+    "pg_search": "pgembed_pgsearch",
+    "pgsql_http": "pgembed_pgsql_http",
 }
 
 EXTENSION_SO_FILES = {
-    "pgvector": "vector.so",
-    "pgvectorscale": "vectorscale-0.5.1.so",
-    "pgtextsearch": "pg_textsearch.so",
-    "pg_search": "pg_search.so",
-    "pg_duckdb": "pg_duckdb.so",
-    "pgsql_http": "http.so",
+    "pgvector": ("vector.so", "vector.dylib", "vector.dll"),
+    "pgvectorscale": (
+        "vectorscale-0.9.0.so",
+        "vectorscale-0.9.0.dylib",
+        "vectorscale-0.5.1.so",
+        "vectorscale-0.5.1.dylib",
+        "vectorscale.so",
+        "vectorscale.dylib",
+    ),
+    "pgtextsearch": ("pg_textsearch.so", "pg_textsearch.dylib"),
+    "pg_search": ("pg_search.so", "pg_search.dylib"),
+    "pg_duckdb": ("pg_duckdb.so", "pg_duckdb.dylib"),
+    "pgsql_http": ("http.so", "http.dylib"),
 }
 
 EXTENSION_NAMES = (
@@ -51,8 +59,20 @@ EXTENSION_NAMES = (
     "pgtextsearch",
     "pg_search",
     "pg_duckdb",
-    "pgsql_http"
+    "pgsql_http",
 )
+
+
+def _find_bundled_so(name: str) -> Optional[Path]:
+    so_files = EXTENSION_SO_FILES.get(name, ())
+    if isinstance(so_files, str):
+        so_files = (so_files,)
+    for lib_dir in (EXTENSION_POSTGRES_LIB_PATH, EXTENSION_LIB_PATH):
+        for so_file in so_files:
+            candidate = lib_dir / so_file
+            if candidate.exists():
+                return candidate
+    return None
 
 
 def _detect_extensions():
@@ -63,6 +83,13 @@ def _detect_extensions():
         try:
             if pkg_name:
                 ext_pkg = __import__(pkg_name)
+                if hasattr(ext_pkg, "install_into_pgembed"):
+                    try:
+                        ext_pkg.install_into_pgembed()
+                    except Exception as exc:
+                        _logger.debug(
+                            f"Failed to install split extension {pkg_name} into pginstall: {exc}"
+                        )
                 ext_path = ext_pkg.get_extension_path()
                 if ext_path and ext_path.exists():
                     AVAILABLE_EXTENSIONS[name] = True
@@ -71,13 +98,11 @@ def _detect_extensions():
         except ImportError:
             pass
 
-        so_file = EXTENSION_SO_FILES.get(name)
-        if so_file:
-            bundled_path = EXTENSION_POSTGRES_LIB_PATH / so_file
-            if bundled_path.exists():
-                AVAILABLE_EXTENSIONS[name] = True
-                _logger.info(f"Detected extension from bundled lib: {name}")
-                continue
+        bundled_path = _find_bundled_so(name)
+        if bundled_path is not None:
+            AVAILABLE_EXTENSIONS[name] = True
+            _logger.info(f"Detected extension from bundled lib: {name}")
+            continue
 
         AVAILABLE_EXTENSIONS[name] = False
 
@@ -118,37 +143,31 @@ def get_extension_create_name(name: str) -> str:
         "pgtextsearch": "pg_textsearch",
         "pg_search": "pg_search",
         "pg_duckdb": "pg_duckdb",
-        "pgsql_http": "http"
+        "pgsql_http": "http",
     }
     return create_names.get(name, name)
 
 
 def get_extension_path(name: str) -> Optional[Path]:
-    """Get the path to an extension .so file.
+    """Get the path to an extension .so/.dylib file.
 
     Args:
         name: Extension name (e.g., 'pgvector', 'pgtextsearch')
 
     Returns:
-        Path to the .so file, or None if not available.
+        Path to the shared library file, or None if not available.
     """
     pkg_name = EXTENSION_PACKAGES.get(name)
     if pkg_name:
         try:
             ext_pkg = __import__(pkg_name)
             ext_path = ext_pkg.get_extension_path()
-            if ext_path:
+            if ext_path and ext_path.exists():
                 return ext_path
         except ImportError:
             pass
 
-    so_file = EXTENSION_SO_FILES.get(name)
-    if so_file:
-        bundled_path = EXTENSION_POSTGRES_LIB_PATH / so_file
-        if bundled_path.exists():
-            return bundled_path
-
-    return None
+    return _find_bundled_so(name)
 
 
 _detect_extensions()

@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Union, Sequence
 import shutil
 import atexit
 import subprocess
@@ -53,7 +53,13 @@ class PostgresServer:
     lock_path = platformdirs.user_runtime_path("python_PostgresServer") / ".lockfile"
     _lock = fasteners.InterProcessLock(lock_path)
 
-    def __init__(self, pgdata: Path, *, cleanup_mode: Optional[str] = "stop"):
+    def __init__(
+        self,
+        pgdata: Path,
+        *,
+        cleanup_mode: Optional[str] = "stop",
+        shared_preload_libraries: Optional[Union[str, Sequence[str]]] = None,
+    ):
         """Initializes the postgresql server instance.
         Constructor is intended to be called directly, use get_server() instead.
         """
@@ -61,6 +67,17 @@ class PostgresServer:
 
         self.pgdata = pgdata
         self.log = self.pgdata / "log"
+        if isinstance(shared_preload_libraries, str):
+            self.shared_preload_libraries: Optional[str] = (
+                shared_preload_libraries.strip() or None
+            )
+        elif shared_preload_libraries is not None:
+            joined = ",".join(
+                lib.strip() for lib in shared_preload_libraries if lib and lib.strip()
+            )
+            self.shared_preload_libraries = joined or None
+        else:
+            self.shared_preload_libraries = None
 
         # postgres user name, NB not the same as system user name
         self.system_user = None
@@ -203,10 +220,21 @@ class PostgresServer:
                     '-h ""',  # no listening on any IP addresses (forwarded to postgres exec) see man postgres for -hj
                     "-o",
                     f"-k {socket_dir}",  # socket option (forwarded to postgres exec) see man postgres for -k
-                    "-l",
-                    str(self.log),  # log location: set to pgdata dir also
-                    "start",  # action
                 ]
+                if self.shared_preload_libraries:
+                    pg_ctl_args.extend(
+                        [
+                            "-o",
+                            f"-c shared_preload_libraries={self.shared_preload_libraries}",
+                        ]
+                    )
+                pg_ctl_args.extend(
+                    [
+                        "-l",
+                        str(self.log),  # log location: set to pgdata dir also
+                        "start",  # action
+                    ]
+                )
             else:  # Windows,
                 socket_dir = None
                 # socket.AF_UNIX is undefined when running on Windows, so default to a port
@@ -218,10 +246,21 @@ class PostgresServer:
                     f'-h "{host}"',
                     "-o",
                     f"-p {port}",
-                    "-l",
-                    str(self.log),  # log location: set to pgdata dir also
-                    "start",  # action
                 ]
+                if self.shared_preload_libraries:
+                    pg_ctl_args.extend(
+                        [
+                            "-o",
+                            f"-c shared_preload_libraries={self.shared_preload_libraries}",
+                        ]
+                    )
+                pg_ctl_args.extend(
+                    [
+                        "-l",
+                        str(self.log),  # log location: set to pgdata dir also
+                        "start",  # action
+                    ]
+                )
 
             try:
                 _logger.info(f"running pg_ctl... {pg_ctl_args=}")
@@ -320,7 +359,8 @@ class PostgresServer:
             The output from the CREATE EXTENSION command.
 
         Raises:
-            RuntimeError: If the extension is not available in the installation.
+            RuntimeError: If the extension is not available in the installation or
+                requires shared_preload_libraries that were not preloaded.
         """
         import pgembed
         from pgembed import AVAILABLE_EXTENSIONS, get_extension_create_name
@@ -341,6 +381,19 @@ class PostgresServer:
                 f"Available extensions: {[k for k, v in AVAILABLE_EXTENSIONS.items() if v]}"
             )
         create_name = get_extension_create_name(pkg_name)
+        if pkg_name == "pg_search":
+            preload_out = self.psql("SHOW shared_preload_libraries;")
+            preload_lines = preload_out.splitlines()
+            preload_val = preload_lines[2].strip() if len(preload_lines) >= 3 else ""
+            preloaded = [
+                item.strip() for item in preload_val.split(",") if item.strip()
+            ]
+            if "pg_search" not in preloaded:
+                raise RuntimeError(
+                    "Extension 'pg_search' requires 'pg_search' in shared_preload_libraries. "
+                    "Start the server with pgembed.get_server(pgdata, shared_preload_libraries=['pg_search'])."
+                )
+            return self.psql(f"CREATE EXTENSION IF NOT EXISTS {create_name} CASCADE;")
         return self.psql(f"CREATE EXTENSION IF NOT EXISTS {create_name};")
 
     def __enter__(self):
@@ -358,15 +411,21 @@ class PostgresServer:
 
 
 def get_server(
-    pgdata: Union[Path, str], cleanup_mode: Optional[str] = "stop"
+    pgdata: Union[Path, str],
+    cleanup_mode: Optional[str] = "stop",
+    *,
+    shared_preload_libraries: Optional[Union[str, Sequence[str]]] = None,
 ) -> PostgresServer:
     """Returns handle to postgresql server instance for the given pgdata directory.
     Args:
-        pgdata: pddata directory. If the pgdata directory does not exist, it will be created, but its
+        pgdata: pgdata directory. If the pgdata directory does not exist, it will be created, but its
         parent must exists and be a valid directory.
         cleanup_mode: If 'stop', the server will be stopped when the last handle is closed (default)
                         If 'delete', the server will be stopped and the pgdata directory will be deleted.
                         If None, the server will not be stopped or deleted.
+        shared_preload_libraries: Optional library name or sequence of library names to pass to
+                        PostgreSQL's shared_preload_libraries GUC at server start
+                        (e.g. ['pg_search'] for ParadeDB pg_search).
 
         To create a temporary server, use mkdtemp() to create a temporary directory and pass it as pg_data,
         and set cleanup_mode to 'delete'.
@@ -386,4 +445,8 @@ def get_server(
     if pgdata in PostgresServer._instances:
         return PostgresServer._instances[pgdata]
 
-    return PostgresServer(pgdata, cleanup_mode=cleanup_mode)
+    return PostgresServer(
+        pgdata,
+        cleanup_mode=cleanup_mode,
+        shared_preload_libraries=shared_preload_libraries,
+    )

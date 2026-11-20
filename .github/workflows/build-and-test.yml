@@ -20,17 +20,17 @@ jobs:
             os: macos-latest
             arch: arm64
             deployment-target: '11.0'
-            extensions: pgvector pgvectorscale pgtextsearch pg_duckdb
+            extensions: pgvector pgtextsearch pg_duckdb
           - runner: ubuntu-latest
             os: ubuntu-latest
             arch: x86_64
             deployment-target: ''
-            extensions: pgvector pgvectorscale pgtextsearch pg_duckdb
+            extensions: pgvector pgtextsearch pg_duckdb
           - runner: ubuntu-24.04-arm
             os: ubuntu-latest
             arch: aarch64
             deployment-target: ''
-            extensions: pgvector pgvectorscale pgtextsearch pg_duckdb
+            extensions: pgvector pgtextsearch pg_duckdb
           - runner: windows-2022
             os: windows-2022
             arch: AMD64
@@ -85,11 +85,6 @@ jobs:
           # Set BISON_PKGDATADIR to the correct data directory
           echo "BISON_PKGDATADIR=C:\\ProgramData\\chocolatey\\lib\\winflexbison3\\tools\\data" >> $env:GITHUB_ENV
 
-      - name: Install Rust
-        if: matrix.os != 'ubuntu-latest'
-        run: |
-          rustup install 1.88.0
-          rustup default 1.88.0
       - name: Install ccache
         if: matrix.os != 'ubuntu-latest'
         shell: bash
@@ -117,12 +112,11 @@ jobs:
         run: |
           INSTALL_BIN="$(pwd)/src/pgembed/pginstall/bin"
           if [ "${{ matrix.os }}" = "macos-latest" ]; then
-            export PATH="$INSTALL_BIN:$HOME/.cargo/bin:/opt/homebrew/opt/ccache/bin:$PATH"
+            export PATH="$INSTALL_BIN:/opt/homebrew/opt/ccache/bin:$PATH"
             export LDFLAGS="-L/opt/homebrew/lib -lssl -lcrypto"
             export IS_MUSL=0
-            cargo install cargo-pgrx --version 0.16.1 --locked
           elif [ "${{ matrix.os }}" = "windows-2022" ]; then
-            export PATH="$INSTALL_BIN:$USERPROFILE/.cargo/bin:C:\ProgramData\chocolatey\lib\ccache\tools\ccache-${{ matrix.arch }}-windows:$PATH"
+            export PATH="$INSTALL_BIN:C:\ProgramData\chocolatey\lib\ccache\tools\ccache-${{ matrix.arch }}-windows:$PATH"
             export IS_MUSL=0
           fi
           make
@@ -146,15 +140,11 @@ jobs:
           CIBW_BEFORE_ALL_WINDOWS: |
             choco install llvm cmake ninja
             export IS_MUSL=0
-            cargo install cargo-pgrx --version 0.16.1 --locked
             make
-            make EXTENSIONS=pg_search
           CIBW_BEFORE_ALL_MACOS: |
             brew install jq llvm cmake ninja lz4 openssl
             export IS_MUSL=0
-            cargo install cargo-pgrx --version 0.16.1 --locked
             make
-            make EXTENSIONS=pg_search
           CIBW_BEFORE_ALL_LINUX: |
             set -e
             if command -v apk &> /dev/null; then
@@ -168,30 +158,19 @@ jobs:
               apt-get install -y ccache jq gcc libssl-dev llvm-dev clang-dev pkg-config
               apt-get install -y cmake ninja-build liblz4-dev libcurl4-openssl-dev libglib2.0-dev
             fi
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
-            export PATH="$HOME/.cargo/bin:/usr/lib/ccache:$PATH"
-            rustup default 1.88.0
-            cargo install cargo-pgrx --version 0.16.1 --locked
+            export PATH="/usr/lib/ccache:$PATH"
             if command -v ldd &> /dev/null && ldd --version 2>&1 | grep -qi musl; then
               export IS_MUSL=1
             else
               export IS_MUSL=0
             fi
-            if [ "$(uname -m)" = "x86_64" ]; then
-              export RUSTFLAGS="-C target-feature=+avx2,+fma"
-            fi
             make
-            if [ "$IS_MUSL" != "1" ]; then
-              make EXTENSIONS=pg_search
-            else
-              echo "Skipping pg_search build on musl libc"
-            fi
-          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH:/project/src/pgembed/pginstall/bin"
+          CIBW_ENVIRONMENT_LINUX: PATH="$PATH:/project/src/pgembed/pginstall/bin"
           CIBW_ENVIRONMENT_MUSLLINUX: LIBCLANG_STATIC_PATH=/usr/lib
           CIBW_ENVIRONMENT_MANYLINUX: LIBCLANG_PATH=/usr/lib64
-          CIBW_ENVIRONMENT_MACOS: PATH="$PWD/src/pgembed/pginstall/bin:$HOME/.cargo/bin:/opt/homebrew/opt/ccache/bin:$PATH" LDFLAGS="-L/opt/homebrew/lib -lssl -lcrypto" MACOSX_DEPLOYMENT_TARGET=15.0 BINDGEN_EXTRA_CLANG_ARGS="$(pg_config --cppflags) -I$(xcrun --show-sdk-path)/usr/include -I/opt/homebrew/include"
+          CIBW_ENVIRONMENT_MACOS: PATH="$PWD/src/pgembed/pginstall/bin:/opt/homebrew/opt/ccache/bin:$PATH" LDFLAGS="-L/opt/homebrew/lib -lssl -lcrypto" MACOSX_DEPLOYMENT_TARGET=15.0 BINDGEN_EXTRA_CLANG_ARGS="$(pg_config --cppflags) -I$(xcrun --show-sdk-path)/usr/include -I/opt/homebrew/include"
           CIBW_TEST_COMMAND_WINDOWS: true  # Tests disabled pending issues with executing binaries built
-          CIBW_ENVIRONMENT_WINDOWS: PATH="$PWD\\src\\pgembed\\pginstall\\bin;$USERPROFILE\\.cargo\\bin;C:\\ProgramData\\chocolatey\\lib\\ccache\\tools\\ccache-AMD64-windows;$PATH" LIBCLANG_PATH="C:\\Program Files\\LLVM\\bin"
+          CIBW_ENVIRONMENT_WINDOWS: PATH="$PWD\\src\\pgembed\\pginstall\\bin;C:\\ProgramData\\chocolatey\\lib\\ccache\\tools\\ccache-AMD64-windows;$PATH" LIBCLANG_PATH="C:\\Program Files\\LLVM\\bin"
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}
         run: python -m cibuildwheel --output-dir wheelhouse
       - name: Save postgres build

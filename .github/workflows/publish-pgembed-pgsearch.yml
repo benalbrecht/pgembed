@@ -1,0 +1,270 @@
+# Build + publish the pgembed-pgsearch split wheel (ParadeDB pg_search v0.27.0).
+#
+# Mirrors publish-pgembed-http.yml: same runners, same `make` invocation, same
+# trusted-publishing release action. The ONLY difference is EXTENSIONS:
+# this builds pg_search (and pgvector, which pg_search v0.27.0 requires).
+# No PG_MAJOR is set here on purpose — like base, it uses the pgbuild/Makefile
+# default, so the extension can never drift to a different Postgres major than
+# the base wheel.
+#
+# One-time PyPI setup: register a *pending publisher* for project
+# `pgembed-pgsearch` with owner/repo = this repo, workflow filename =
+# `publish-pgembed-pgsearch.yml`, environment = `pypi`.
+#
+# Release flow: bump src/pgembed_pgsearch/pyproject.toml version, push tag
+# `pgembed-pgsearch-v<version>`. The workflow asserts tag == package version.
+name: Publish pgembed-pgsearch
+
+on:
+  push:
+    tags:
+      - "pgembed-pgsearch-v*"
+  pull_request:
+    paths:
+      - "src/pgembed_pgsearch/**"
+      - "pgbuild/Makefile"
+      - "Makefile"
+      - ".github/workflows/publish-pgembed-pgsearch.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build pgembed-pgsearch on ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same set as publish-pgembed-http.yml (Linux x86_64/aarch64 + macOS arm64).
+        include:
+          - runner: macos-latest
+            os: macos-latest
+            arch: arm64
+            deployment-target: "15.0"
+          - runner: ubuntu-latest
+            os: ubuntu-latest
+            arch: x86_64
+            deployment-target: ""
+          - runner: ubuntu-24.04-arm
+            os: ubuntu-latest
+            arch: aarch64
+            deployment-target: ""
+    env:
+      CARGO_PGRX_VERSION: "0.20.0"
+      CC: ccache gcc
+      CXX: ccache g++
+      CCACHE_DIR: ${{ github.workspace }}/../.ccache
+      CCACHE_MAXSIZE: 5G
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/pgembed-pgsearch-v')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#pgembed-pgsearch-v}"
+          PKG_VERSION="$(grep '^version' src/pgembed_pgsearch/pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "tag version $TAG_VERSION != package version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Restore postgres build from base cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            pgbuild
+            src/pgembed/pginstall
+          key: ${{ runner.os }}-${{ runner.arch }}-build-cache-postgres-${{
+            hashFiles('Makefile', 'pgbuild/Makefile', '.github/workflows/build-and-test.yml') }}
+
+      - name: Restore cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pgbuild/Makefile', '.github/workflows/publish-pgembed-pgsearch.yml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ccache gcc g++ make pkg-config bison flex \
+            libssl-dev zlib1g-dev clang libclang-dev cmake ninja-build \
+            liblz4-dev libcurl4-openssl-dev libglib2.0-dev libffi-dev jq \
+            libopenblas-dev lld patchelf binutils
+
+      - name: Install build deps (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install ccache jq llvm cmake ninja lz4 openssl
+
+      - name: Install Rust 1.100.0 and cargo-pgrx 0.20.0
+        run: |
+          rustup install 1.100.0
+          rustup default 1.100.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install cargo-pgrx --version "$CARGO_PGRX_VERSION" --locked --debug
+
+      - name: Build postgres and pg_search
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment-target }}
+        run: |
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            export PATH="$PWD/src/pgembed/pginstall/bin:$HOME/.cargo/bin:/opt/homebrew/opt/ccache/bin:$PATH"
+            export LDFLAGS="-L/opt/homebrew/lib -lssl -lcrypto"
+            export BINDGEN_EXTRA_CLANG_ARGS="-I$(xcrun --show-sdk-path)/usr/include -I/opt/homebrew/include"
+          else
+            export PATH="$PWD/src/pgembed/pginstall/bin:$HOME/.cargo/bin:$PATH"
+            if [ "${{ matrix.arch }}" = "x86_64" ]; then
+              export RUSTFLAGS="-C target-feature=+avx2,+fma -Clink-arg=-fuse-ld=lld"
+            else
+              export RUSTFLAGS="-Clink-arg=-fuse-ld=lld"
+            fi
+          fi
+          make EXTENSIONS=pg_search
+
+      - name: Stage split-wheel build tree
+        shell: bash
+        run: |
+          rm -rf build-pgembed-pgsearch
+          mkdir -p build-pgembed-pgsearch/pgembed_pgsearch
+          cp src/pgembed_pgsearch/pyproject.toml \
+             src/pgembed_pgsearch/setup.py \
+             src/pgembed_pgsearch/README.md build-pgembed-pgsearch/
+          cp src/pgembed_pgsearch/__init__.py build-pgembed-pgsearch/pgembed_pgsearch/
+          BIN=src/pgembed/pginstall/bin
+          LIB="$("$BIN/pg_config" --pkglibdir)"
+          SHAREDIR="$("$BIN/pg_config" --sharedir)"
+          if [ -d "$SHAREDIR/postgresql/extension" ]; then
+            SHARE="$SHAREDIR/postgresql/extension"
+          else
+            SHARE="$SHAREDIR/extension"
+          fi
+          ls "$LIB"/pg_search.* "$SHARE"/pg_search.control "$SHARE"/pg_search--*.sql
+          cp "$LIB"/pg_search.* build-pgembed-pgsearch/pgembed_pgsearch/
+          cp "$SHARE"/pg_search.control "$SHARE"/pg_search--*.sql build-pgembed-pgsearch/pgembed_pgsearch/
+
+          # On Linux, bundle runtime shared libraries (libopenblas, libgfortran, libquadmath)
+          # and strip debug/unneeded symbols so the wheel works on minimal containers and
+          # stays well under PyPI's 100 MB file size limit.
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            SO_FILE="build-pgembed-pgsearch/pgembed_pgsearch/pg_search.so"
+            unresolved="$(nm -D -u "$SO_FILE" | awk '{print $NF}' | grep -E '^_(ZN|R)' || true)"
+            if [ -n "$unresolved" ]; then
+              echo "ERROR: pg_search.so has unresolved Rust symbols:"
+              echo "$unresolved"
+              exit 1
+            fi
+            for dep in $(ldd "$SO_FILE" | awk '/lib(openblas|gfortran|quadmath|blas|lapack)\.so/ {print $3}'); do
+              if [ -n "$dep" ] && [ -f "$dep" ]; then
+                cp -L "$dep" build-pgembed-pgsearch/pgembed_pgsearch/
+                patchelf --set-rpath '$ORIGIN' "build-pgembed-pgsearch/pgembed_pgsearch/$(basename "$dep")" || true
+                strip --strip-unneeded "build-pgembed-pgsearch/pgembed_pgsearch/$(basename "$dep")" || true
+              fi
+            done
+            patchelf --set-rpath '$ORIGIN' "$SO_FILE"
+            strip --strip-unneeded "$SO_FILE"
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            strip -x build-pgembed-pgsearch/pgembed_pgsearch/pg_search.dylib || true
+          fi
+          ls -lh build-pgembed-pgsearch/pgembed_pgsearch/
+
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          cd build-pgembed-pgsearch
+          python -m build
+          ls -lh dist/
+          if ls dist/*-py3-none-any.whl >/dev/null 2>&1; then
+            echo "pure-Python wheel tag on a binary wheel — refusing"
+            exit 1
+          fi
+          # Verify wheel size is under PyPI's 100 MB limit (104857600 bytes)
+          for whl in dist/*.whl; do
+            size="$(wc -c < "$whl")"
+            echo "Wheel $whl size: $size bytes"
+            if [ "$size" -ge 104857600 ]; then
+              echo "ERROR: Wheel $whl exceeds PyPI 100 MB limit ($size bytes)"
+              exit 1
+            fi
+          done
+
+      - name: Smoke test (CREATE EXTENSION pg_search + BM25 search)
+        run: |
+          # Remove pg_search from src/pgembed/pginstall first so the smoke test
+          # proves the split wheel itself installs and loads pg_search into pgembed.
+          rm -f src/pgembed/pginstall/lib/pg_search.* \
+                src/pgembed/pginstall/lib/postgresql/pg_search.* \
+                src/pgembed/pginstall/share/extension/pg_search* \
+                src/pgembed/pginstall/share/postgresql/extension/pg_search*
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg2-binary" . "build-pgembed-pgsearch/dist/"*.whl
+          python - <<'EOF'
+          import tempfile
+          import pgembed
+          print(pgembed.list_extensions())
+          assert pgembed.has_extension("pg_search"), "pg_search not detected after installing wheel"
+          with pgembed.get_server(
+              tempfile.mkdtemp(),
+              cleanup_mode="delete",
+              shared_preload_libraries=["pg_search"],
+          ) as pg:
+              out = pg.create_extension("pg_search")
+              assert "CREATE EXTENSION" in out, out
+              ver = pg.psql("SELECT extversion FROM pg_extension WHERE extname='pg_search';")
+              print(ver)
+              assert "0.27." in ver, ver
+              pg.psql("""
+                  CREATE TABLE mock_items (id int PRIMARY KEY, description text);
+                  INSERT INTO mock_items VALUES
+                      (1, 'mechanical keyboard with tactile switches'),
+                      (2, 'ergonomic wireless mouse');
+                  CREATE INDEX idx_items_bm25 ON mock_items USING bm25 (id, description) WITH (key_field='id');
+              """)
+              res = pg.psql("SELECT id, pdb.score(id) FROM mock_items WHERE description ||| 'keyboard';")
+              print(res)
+              assert "1" in res, res
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          path: build-pgembed-pgsearch/dist/*
+          name: pgembed-pgsearch-${{ matrix.os }}-${{ matrix.arch }}
+          overwrite: true
+
+  publish-to-pypi:
+    if: startsWith(github.ref, 'refs/tags/pgembed-pgsearch-v')
+    name: Publish pgembed-pgsearch to PyPI
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pgembed-pgsearch
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all the dists
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pgembed-pgsearch-*
+          path: dist/
+          merge-multiple: true
+      - name: Publish distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -56,9 +56,8 @@ jobs:
     timeout-minutes: 300
     env:
       PG_MAJOR: ${{ inputs.pg_major || '18' }}
-      # Must match the pgrx version pinned by the pgrx-based extensions
-      # (pgvectorscale, pg_search); 0.16.1 supports Postgres 18.
-      CARGO_PGRX_VERSION: "0.16.1"
+      # Must match the pgrx version pinned by pg_search v0.27.0 (pgrx 0.20.0 supports Postgres 15-18).
+      CARGO_PGRX_VERSION: "0.20.0"
       # Route all C/C++ compilation (postgres, pgvector, pg_duckdb, ...) through ccache.
       CC: ccache gcc
       CXX: ccache g++
@@ -75,17 +74,19 @@ jobs:
           sudo apt-get update
           # NB: noble has no clang-dev/llvm-dev metapackages; libclang-dev provides
           # the libclang that bindgen (via cargo-pgrx) needs.
+          # libopenblas-dev and lld are required by pg_search v0.27.0 (superkmeans-rs + .cargo/config.toml).
           sudo apt-get install -y ccache bison flex gcc libssl-dev clang libclang-dev pkg-config \
-            cmake ninja-build liblz4-dev libcurl4-openssl-dev libglib2.0-dev libffi-dev jq
+            cmake ninja-build liblz4-dev libcurl4-openssl-dev libglib2.0-dev libffi-dev jq \
+            libopenblas-dev lld
 
       - name: Install Rust toolchain
         run: |
-          rustup update stable
-          rustup default stable
+          rustup install 1.100.0
+          rustup default 1.100.0
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version "$CARGO_PGRX_VERSION" --locked
+        run: cargo install cargo-pgrx --version "$CARGO_PGRX_VERSION" --locked --debug
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -119,10 +120,10 @@ jobs:
           make "${args[@]}"
 
       - name: Build pg_search
-        # Built separately in build-and-test.yml too (not in the default set).
+        # Built separately for the pgembed-pgsearch split wheel (not in the default base wheel set).
         if: ${{ inputs.extensions == '' }}
         env:
-          RUSTFLAGS: "-C target-feature=+avx2,+fma"
+          RUSTFLAGS: "-C target-feature=+avx2,+fma -Clink-arg=-fuse-ld=lld"
         run: make PG_MAJOR="$PG_MAJOR" EXTENSIONS=pg_search
 
       - name: Show ccache stats
@@ -135,6 +136,15 @@ jobs:
           "$BIN/postgres" --version
           "$BIN/pg_config" --version
           ls -la src/pgembed/pginstall/lib/*.so
+          if [ -f src/pgembed/pginstall/lib/pg_search.so ]; then
+            ldd src/pgembed/pginstall/lib/pg_search.so
+            unresolved="$(nm -D -u src/pgembed/pginstall/lib/pg_search.so | awk '{print $NF}' | grep -E '^_(ZN|R)' || true)"
+            if [ -n "$unresolved" ]; then
+              echo "ERROR: pg_search.so has unresolved Rust symbols:"
+              echo "$unresolved"
+              exit 1
+            fi
+          fi
 
       - name: Install package with test extras
         run: |

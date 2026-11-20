@@ -102,6 +102,44 @@ def test_get_port():
     finally:
         sock.close()
 
+@pytest.mark.no_server_required
+def test_pgsearch_split_wheel_autoinstall(monkeypatch):
+    import pgembed_pgsearch
+
+    assert "pg_search" in pgembed.EXTENSION_NAMES
+    assert pgembed.EXTENSION_PACKAGES.get("pg_search") == "pgembed_pgsearch"
+    assert pgembed.get_extension_create_name("pg_search") == "pg_search"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        fake_pginstall = tmp / "pginstall"
+        fake_lib = fake_pginstall / "lib" / "postgresql"
+        fake_share = fake_pginstall / "share" / "postgresql" / "extension"
+        fake_lib.mkdir(parents=True)
+        fake_share.mkdir(parents=True)
+
+        fake_pkg = tmp / "fake_pkg"
+        fake_pkg.mkdir()
+        (fake_pkg / "pg_search.so").write_bytes(b"fake_so")
+        (fake_pkg / "libopenblas.so.0").write_bytes(b"fake_blas")
+        (fake_pkg / "pg_search.control").write_text(
+            "default_version = '0.27.0'\nrequires = 'vector'\n"
+        )
+        (fake_pkg / "pg_search--0.27.0.sql").write_text("-- sql")
+
+        monkeypatch.setattr(pgembed, "EXTENSION_LIB_PATH", fake_pginstall / "lib")
+        monkeypatch.setattr(pgembed, "EXTENSION_POSTGRES_LIB_PATH", fake_lib)
+        monkeypatch.setattr(pgembed_pgsearch, "__file__", str(fake_pkg / "__init__.py"))
+
+        pgembed._detect_extensions()
+        assert pgembed.has_extension("pg_search") is True
+        assert (fake_lib / "pg_search.so").exists()
+        assert (fake_lib / "libopenblas.so.0").exists()
+        assert (fake_share / "pg_search.control").exists()
+        assert (fake_share / "pg_search--0.27.0.sql").exists()
+
+    pgembed._detect_extensions()
+
 def test_get_server():
     with tempfile.TemporaryDirectory() as tmpdir:
         pid = None
@@ -261,6 +299,56 @@ def test_pgsql_http(tmp_postgres):
         pytest.skip("pgsql_http extension not available in this build")
     ret = tmp_postgres.create_extension("http")
     assert ret.strip() == "CREATE EXTENSION"
+
+def test_pg_search_requires_preload(tmp_postgres):
+    if not pgembed.has_extension("pg_search"):
+        pytest.skip("pg_search extension not available in this build")
+    with pytest.raises(RuntimeError, match="shared_preload_libraries"):
+        tmp_postgres.create_extension("pg_search")
+
+def test_pg_search():
+    if not pgembed.has_extension("pg_search"):
+        pytest.skip("pg_search extension not available in this build")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pgembed.get_server(
+            tmpdir,
+            cleanup_mode="delete",
+            shared_preload_libraries=["pg_search"],
+        ) as pg:
+            ret = pg.create_extension("pg_search")
+            assert "CREATE EXTENSION" in ret
+
+            ver = pg.psql(
+                "SELECT extversion FROM pg_extension WHERE extname = 'pg_search';"
+            )
+            assert "0.27." in ver
+
+            pg.psql("""
+                CREATE TABLE search_items (
+                    id INT PRIMARY KEY,
+                    description TEXT
+                );
+                INSERT INTO search_items (id, description) VALUES
+                    (1, 'mechanical keyboard with tactile switches'),
+                    (2, 'ergonomic wireless mouse'),
+                    (3, 'gaming keyboard with RGB lighting');
+                CREATE INDEX search_items_bm25_idx ON search_items
+                    USING bm25 (id, description) WITH (key_field = 'id');
+            """)
+
+            res = pg.psql("""
+                SELECT id, pdb.score(id) AS score
+                FROM search_items
+                WHERE description ||| 'keyboard'
+                ORDER BY score DESC;
+            """)
+            lines = [line.strip() for line in res.splitlines() if "|" in line]
+            # Header + 2 matching rows (ids 1 and 3)
+            assert len(lines) == 3
+            for row in lines[1:]:
+                cols = [c.strip() for c in row.split("|")]
+                assert int(cols[0]) in (1, 3)
+                assert float(cols[1]) > 0.0
 
 def test_start_failure_log(caplog):
     """ Test server log contents are shown in python log when failures
